@@ -8,15 +8,14 @@ from datetime import timedelta
 
 load_dotenv()
 
-
 # Import hardware and camera modules
 from hardware import traffic_controller
 from camera import camera_stream, generate_frames
 
 app = Flask(__name__)
-# In production, use a strong, random secret key
 app.secret_key = os.environ.get('SECRET_KEY', 'super_secret_key_for_development')
 app.permanent_session_lifetime = timedelta(minutes=30)
+
 
 def get_db_connection():
     try:
@@ -24,7 +23,7 @@ def get_db_connection():
         if not db_url:
             print("DATABASE_URL environment variable not set. Please set it in .env file.")
             return None
-            
+
         url = urlparse(db_url)
         conn = pymysql.connect(
             host=url.hostname,
@@ -38,6 +37,7 @@ def get_db_connection():
     except Exception as err:
         print(f"Error connecting to database: {err}")
         return None
+
 
 def log_system_event(event_type, description):
     conn = get_db_connection()
@@ -55,21 +55,108 @@ def log_system_event(event_type, description):
         finally:
             conn.close()
 
+
 def log_decision(counts, selected_lane, priority_score, green_duration, reason):
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO decision_logs 
+                INSERT INTO decision_logs
                 (lane_a_count, lane_b_count, lane_c_count, selected_lane, priority_score, green_duration, reason)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (counts.get('A', 0), counts.get('B', 0), counts.get('C', 0), selected_lane, priority_score, green_duration, reason))
+            """, (
+                counts.get('A', 0),
+                counts.get('B', 0),
+                counts.get('C', 0),
+                selected_lane,
+                priority_score,
+                green_duration,
+                reason
+            ))
             conn.commit()
+            cursor.close()
         except Exception as e:
             print(f"Failed to log decision: {e}")
         finally:
             conn.close()
+
+
+def update_latest_status(status_data):
+    conn = get_db_connection()
+    if conn:
+        try:
+            lanes = status_data["lanes"]
+            cursor = conn.cursor()
+            cursor.execute("""
+                REPLACE INTO latest_status
+                (id, active_lane,
+                 lane_a_light, lane_a_count, lane_a_wait_time, lane_a_priority,
+                 lane_b_light, lane_b_count, lane_b_wait_time, lane_b_priority,
+                 lane_c_light, lane_c_count, lane_c_wait_time, lane_c_priority)
+                VALUES
+                (1, %s,
+                 %s, %s, %s, %s,
+                 %s, %s, %s, %s,
+                 %s, %s, %s, %s)
+            """, (
+                status_data.get("active_lane"),
+                lanes["A"]["light"], lanes["A"]["count"], lanes["A"]["wait_time"], lanes["A"]["priority"],
+                lanes["B"]["light"], lanes["B"]["count"], lanes["B"]["wait_time"], lanes["B"]["priority"],
+                lanes["C"]["light"], lanes["C"]["count"], lanes["C"]["wait_time"], lanes["C"]["priority"],
+            ))
+            conn.commit()
+            cursor.close()
+        except Exception as e:
+            print(f"Failed to update latest status: {e}")
+        finally:
+            conn.close()
+
+
+def get_latest_status_from_database():
+    conn = get_db_connection()
+    if not conn:
+        return None
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM latest_status WHERE id = 1")
+        row = cursor.fetchone()
+        cursor.close()
+
+        if not row:
+            return None
+
+        return {
+            "active_lane": row["active_lane"],
+            "lanes": {
+                "A": {
+                    "light": row["lane_a_light"],
+                    "count": row["lane_a_count"],
+                    "wait_time": row["lane_a_wait_time"],
+                    "priority": row["lane_a_priority"]
+                },
+                "B": {
+                    "light": row["lane_b_light"],
+                    "count": row["lane_b_count"],
+                    "wait_time": row["lane_b_wait_time"],
+                    "priority": row["lane_b_priority"]
+                },
+                "C": {
+                    "light": row["lane_c_light"],
+                    "count": row["lane_c_count"],
+                    "wait_time": row["lane_c_wait_time"],
+                    "priority": row["lane_c_priority"]
+                }
+            }
+        }
+
+    except Exception as e:
+        print(f"Failed to get latest status: {e}")
+        return None
+    finally:
+        conn.close()
+
 
 @app.route('/')
 def index():
@@ -77,15 +164,16 @@ def index():
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
 
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
-        
+
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        
+
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
@@ -93,7 +181,7 @@ def login():
             user = cursor.fetchone()
             cursor.close()
             conn.close()
-            
+
             if user and check_password_hash(user['password_hash'], password):
                 session.permanent = True
                 session['user_id'] = user['id']
@@ -104,8 +192,9 @@ def login():
                 flash('Invalid username or password', 'error')
         else:
             flash('Database connection failed', 'error')
-            
+
     return render_template('login.html')
+
 
 @app.route('/logout')
 def logout():
@@ -115,47 +204,80 @@ def logout():
     session.clear()
     return redirect(url_for('login'))
 
+
 @app.route('/dashboard')
 def dashboard():
     if 'user_id' not in session:
         return redirect(url_for('login'))
     return render_template('dashboard.html', username=session.get('username'))
 
+
 @app.route('/video_feed')
 def video_feed():
     if 'user_id' not in session:
         return "Unauthorized", 401
+
+    if os.environ.get("RENDER", "false").lower() == "true":
+        return "Camera feed is only available on Raspberry Pi local dashboard.", 503
+
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
 
 @app.route('/api/status')
 def status():
     """API endpoint to get current traffic light and sensor status"""
     if 'user_id' not in session:
         return jsonify({"error": "Unauthorized"}), 401
-    
-    # Get real data from hardware controller
-    status_data = traffic_controller.get_status()
-    
-    # Fetch recent decisions for the dashboard logs
+
+    is_render = os.environ.get("RENDER", "false").lower() == "true"
+
+    if is_render:
+        # Render reads latest Raspberry Pi status from Railway database
+        status_data = get_latest_status_from_database()
+
+        if not status_data:
+            status_data = {
+                "active_lane": None,
+                "lanes": {
+                    "A": {"light": "red", "count": 0, "wait_time": 0, "priority": 0},
+                    "B": {"light": "red", "count": 0, "wait_time": 0, "priority": 0},
+                    "C": {"light": "red", "count": 0, "wait_time": 0, "priority": 0}
+                }
+            }
+    else:
+        # Raspberry Pi reads real hardware data
+        status_data = traffic_controller.get_status()
+
+        # Raspberry Pi saves latest status into Railway database
+        update_latest_status(status_data)
+
+    # Fetch recent decision logs from Railway database
     conn = get_db_connection()
     recent_logs = []
     if conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM decision_logs ORDER BY timestamp DESC LIMIT 10")
-        rows = cursor.fetchall()
-        for row in rows:
-            recent_logs.append(dict(row))
-        conn.close()
-        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM decision_logs ORDER BY timestamp DESC LIMIT 10")
+            rows = cursor.fetchall()
+            for row in rows:
+                recent_logs.append(dict(row))
+            cursor.close()
+        except Exception as e:
+            print(f"Failed to fetch recent logs: {e}")
+        finally:
+            conn.close()
+
     status_data['recent_logs'] = recent_logs
     return jsonify(status_data)
 
+
 if __name__ == '__main__':
-    # Bind the decision logger
-    traffic_controller.set_decision_callback(log_decision)
-    
-    # Start the camera stream
-    camera_stream.start()
-    
+    is_render = os.environ.get("RENDER", "false").lower() == "true"
+
+    if not is_render:
+        # Only Raspberry Pi should bind hardware callback and start camera
+        traffic_controller.set_decision_callback(log_decision)
+        camera_stream.start()
+
     print("Starting server...")
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

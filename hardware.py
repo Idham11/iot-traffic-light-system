@@ -64,11 +64,11 @@ class TrafficLightController:
     def _read_sensors(self):
         with self.lock:
             if not MOCK_MODE:
-                # Basic presence accumulation logic could be more complex, 
-                # but for simplicity we increment count if active
-                if self.radar_A.is_active: self.lanes['A']['count'] += 1
-                if self.radar_B.is_active: self.lanes['B']['count'] += 1
-                if self.radar_C.is_active: self.lanes['C']['count'] += 1
+                # Presence logic: Set count to 1 if vehicle is detected, 0 if not.
+                # This matches the active presence output (OUT pin) of the HLK-LD2410C sensor.
+                self.lanes['A']['count'] = 1 if self.radar_A.is_active else 0
+                self.lanes['B']['count'] = 1 if self.radar_B.is_active else 0
+                self.lanes['C']['count'] = 1 if self.radar_C.is_active else 0
             else:
                 # Mock Mode: randomly adjust vehicle counts to simulate arriving/departing traffic
                 for lane_id in self.lanes:

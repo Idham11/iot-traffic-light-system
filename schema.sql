@@ -26,3 +26,21 @@ CREATE TABLE IF NOT EXISTS decision_logs (
     green_duration INTEGER NOT NULL,
     reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS latest_status (
+    id INT PRIMARY KEY,
+    active_lane VARCHAR(10),
+    lane_a_light VARCHAR(10),
+    lane_a_count INT,
+    lane_a_wait_time INT,
+    lane_a_priority INT,
+    lane_b_light VARCHAR(10),
+    lane_b_count INT,
+    lane_b_wait_time INT,
+    lane_b_priority INT,
+    lane_c_light VARCHAR(10),
+    lane_c_count INT,
+    lane_c_wait_time INT,
+    lane_c_priority INT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
