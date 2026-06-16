@@ -1,4 +1,5 @@
 import os
+import time
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response
 from werkzeug.security import check_password_hash
 import pymysql.cursors
@@ -8,13 +9,15 @@ from datetime import timedelta
 
 load_dotenv()
 
-# Import hardware and camera modules
 from hardware import traffic_controller
 from camera import camera_stream, generate_frames
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'super_secret_key_for_development')
 app.permanent_session_lifetime = timedelta(minutes=30)
+
+LATEST_CAMERA_PATH = "static/latest_camera.jpg"
+CAMERA_UPLOAD_TOKEN = os.environ.get("CAMERA_UPLOAD_TOKEN", "demo_camera_token")
 
 
 def get_db_connection():
@@ -158,6 +161,23 @@ def get_latest_status_from_database():
         conn.close()
 
 
+def generate_uploaded_camera_frames():
+    while True:
+        if os.path.exists(LATEST_CAMERA_PATH):
+            try:
+                with open(LATEST_CAMERA_PATH, "rb") as f:
+                    frame = f.read()
+
+                yield (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+                )
+            except Exception as e:
+                print(f"Failed to stream uploaded camera frame: {e}")
+
+        time.sleep(0.5)
+
+
 @app.route('/')
 def index():
     if 'user_id' in session:
@@ -217,22 +237,67 @@ def video_feed():
     if 'user_id' not in session:
         return "Unauthorized", 401
 
-    if os.environ.get("RENDER", "false").lower() == "true":
-        return "Camera feed is only available on Raspberry Pi local dashboard.", 503
+    is_render = os.environ.get("RENDER", "false").lower() == "true"
 
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    if is_render:
+        return Response(
+            generate_uploaded_camera_frames(),
+            mimetype='multipart/x-mixed-replace; boundary=frame'
+        )
+
+    return Response(
+        generate_frames(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
+@app.route('/api/local_camera_frame')
+def local_camera_frame():
+    is_render = os.environ.get("RENDER", "false").lower() == "true"
+
+    if is_render:
+        return "Not available on Render", 503
+
+    frame = camera_stream.get_frame()
+
+    if not frame:
+        return "No camera frame yet", 404
+
+    return Response(frame, mimetype="image/jpeg")
+
+
+@app.route('/api/upload_camera', methods=['POST'])
+def upload_camera():
+    token = request.headers.get("X-Camera-Token")
+
+    if token != CAMERA_UPLOAD_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    os.makedirs("static", exist_ok=True)
+
+    image = request.files["image"]
+    temp_path = LATEST_CAMERA_PATH + ".tmp"
+    image.save(temp_path)
+    os.replace(temp_path, LATEST_CAMERA_PATH)
+
+    return jsonify({
+        "status": "success",
+        "message": "Camera snapshot uploaded",
+        "timestamp": time.time()
+    })
 
 
 @app.route('/api/status')
 def status():
-    """API endpoint to get current traffic light and sensor status"""
     if 'user_id' not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
     is_render = os.environ.get("RENDER", "false").lower() == "true"
 
     if is_render:
-        # Render reads latest Raspberry Pi status from Railway database
         status_data = get_latest_status_from_database()
 
         if not status_data:
@@ -245,13 +310,9 @@ def status():
                 }
             }
     else:
-        # Raspberry Pi reads real hardware data
         status_data = traffic_controller.get_status()
-
-        # Raspberry Pi saves latest status into Railway database
         update_latest_status(status_data)
 
-    # Fetch recent decision logs from Railway database
     conn = get_db_connection()
     recent_logs = []
     if conn:
@@ -275,7 +336,6 @@ if __name__ == '__main__':
     is_render = os.environ.get("RENDER", "false").lower() == "true"
 
     if not is_render:
-        # Only Raspberry Pi should bind hardware callback and start camera
         traffic_controller.set_decision_callback(log_decision)
         camera_stream.start()
 
