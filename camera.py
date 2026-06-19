@@ -42,21 +42,27 @@ class CameraStream:
 
                 picam2.configure(config)
 
-                picam2.set_controls({
-                    "AwbEnable": True,
-                    "AeEnable": True
-                })
-
                 picam2.start()
-                time.sleep(3)
+                time.sleep(2)
+
+                try:
+                    picam2.set_controls({
+                        "AwbEnable": True,
+                        "AeEnable": True,
+                        "Saturation": 1.0,
+                        "Contrast": 1.0,
+                        "Brightness": 0.0
+                    })
+                except Exception as e:
+                    print(f"Camera colour control warning: {e}")
+
+                time.sleep(1)
 
                 while self.running:
                     frame_array = picam2.capture_array()
 
-                    # XRGB8888 usually gives 4 channels, convert to normal BGR
                     frame_array = cv2.cvtColor(frame_array, cv2.COLOR_BGRA2BGR)
 
-                    # Output 16:9 supaya dashboard tak nampak zoom/crop sangat
                     frame_array = cv2.resize(frame_array, (640, 360))
 
                     ret, buffer = cv2.imencode(
